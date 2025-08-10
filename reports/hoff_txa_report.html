@@ -69,6 +69,22 @@
         <select id="wellSelect"></select>
         <span class="muted" id="wellContent"></span>
       </div>
+      <label for="multiWell" class="muted">Compare</label>
+      <select id="multiWell" multiple size="4" style="min-width:160px"></select>
+      <label for="yScale" class="muted">Scale</label>
+      <select id="yScale">
+        <option value="linear">Linear</option>
+        <option value="log">Log</option>
+      </select>
+      <label for="smoothChk" class="muted">Smooth</label>
+      <input id="smoothChk" type="checkbox" />
+      <label for="normalize" class="muted">Normalize</label>
+      <select id="normalize">
+        <option value="none">None</option>
+        <option value="t0">to t0</option>
+        <option value="max">to max</option>
+      </select>
+      <button id="exportPng" class="btn secondary" title="Export chart as PNG">Export PNG</button>
       <input id="filterInput" type="text" placeholder="Filter wells by id or content..." />
       <label for="sortSelect" class="muted">Sort</label>
       <select id="sortSelect">
@@ -86,8 +102,10 @@
       <div class="card">
         <b>Selected well stats</b>
         <div id="statsBox" class="stat muted"></div>
+        <div id="legendBox" class="stat" style="margin-top:8px;"></div>
       </div>
     </div>
+    <div id="tooltip" style="position:absolute; pointer-events:none; background: var(--card); color: var(--fg); border:1px solid var(--border); padding:6px 8px; border-radius:6px; font-size:12px; display:none;"></div>
   </section>
 
   <section id="relations" style="margin-top:16px;">
@@ -105,6 +123,14 @@
         <div class="muted" style="margin-top:6px;">
           Blue = negative, White = 0, Red = positive; click a cell to select that well (row).
         </div>
+        <div class="row" style="margin-top:8px; gap:12px;">
+          <label class="muted">Window</label>
+          <input id="winStart" type="range" min="0" max="59" value="0" />
+          <input id="winEnd" type="range" min="0" max="59" value="59" />
+          <span id="winLabel" class="muted"></span>
+          <button id="clusterBtn" class="btn secondary">Cluster order</button>
+          <button id="resetOrderBtn" class="btn secondary">Reset order</button>
+        </div>
       </div>
       <div class="card">
         <b>Most similar wells</b>
@@ -121,6 +147,22 @@
   </section>
 
   <section class="table-wrap">
+    <div class="row" style="padding:8px;">
+      <span class="muted">Content chips:</span>
+      <div id="chips" class="row" style="gap:6px;"></div>
+      <div style="margin-left:auto; display:flex; align-items:center; gap:8px;">
+        <label class="muted">Page size</label>
+        <select id="pageSize">
+          <option>10</option>
+          <option>20</option>
+          <option selected>50</option>
+          <option>100</option>
+        </select>
+        <button id="prevPage" class="btn secondary">Prev</button>
+        <span id="pageInfo" class="muted"></span>
+        <button id="nextPage" class="btn secondary">Next</button>
+      </div>
+    </div>
     <table id="dataTable"></table>
   </section>
 
@@ -153,106 +195,161 @@
       const opt = document.createElement('option');
       opt.value = w.well; opt.textContent = w.well; wellSelect.appendChild(opt);
     }
+    const multiWell = document.getElementById('multiWell');
+    for (const w of DATA.wells) {
+      const opt = document.createElement('option'); opt.value = w.well; opt.textContent = w.well; multiWell.appendChild(opt);
+    }
 
     const wellContent = document.getElementById('wellContent');
     const svg = document.getElementById('chart');
 
-    function renderChart(wellId) {
-      const w = DATA.wells.find(x => x.well === wellId) || DATA.wells[0];
-      wellContent.textContent = w && w.content ? `Content: ${w.content}` : '';
+    // Helper: settings with persistence
+    const yScaleSel = document.getElementById('yScale');
+    const smoothChk = document.getElementById('smoothChk');
+    const normalizeSel = document.getElementById('normalize');
+    const exportBtn = document.getElementById('exportPng');
+    const legendBox = document.getElementById('legendBox');
+    const tooltip = document.getElementById('tooltip');
+
+    // Load settings
+    try {
+      const saved = JSON.parse(localStorage.getItem('hoff-settings') || '{}');
+      if (saved.yScale) yScaleSel.value = saved.yScale;
+      if (saved.smooth) smoothChk.checked = !!saved.smooth;
+      if (saved.normalize) normalizeSel.value = saved.normalize;
+      if (Array.isArray(saved.multi)) {
+        for (const id of saved.multi) { const opt = Array.from(multiWell.options).find(o=>o.value===id); if (opt) opt.selected = true; }
+      }
+    } catch {}
+
+    function saveSettings() {
+      const multi = Array.from(multiWell.selectedOptions).map(o=>o.value);
+      localStorage.setItem('hoff-settings', JSON.stringify({ yScale: yScaleSel.value, smooth: smoothChk.checked, normalize: normalizeSel.value, multi }));
+    }
+
+    function palette(idx) {
+      const colors = ['#1976d2','#d32f2f','#388e3c','#7b1fa2','#f9a825','#00796b','#5d4037','#c2185b','#0288d1','#512da8'];
+      return colors[idx % colors.length];
+    }
+
+    function movingAverage(arr, win=3) {
+      if (win<=1) return arr.slice();
+      const half = Math.floor(win/2); const out = Array(arr.length).fill(null);
+      for (let i=0;i<arr.length;i++){
+        let s=0,c=0; for(let k=-half;k<=half;k++){ const j=i+k; const v=arr[j]; if(j>=0 && j<arr.length && v!=null && isFinite(v)){ s+=v; c++; } }
+        out[i]= c? s/c : null;
+      }
+      return out;
+    }
+
+    function normalize(values, mode) {
+      const arr = values.slice();
+      if (mode==='none') return arr;
+      const valid = arr.filter(v=>v!=null && isFinite(v));
+      if (!valid.length) return arr;
+      if (mode==='t0') {
+        const base = arr.find(v=>v!=null && isFinite(v));
+        if (!base) return arr; return arr.map(v=> v==null? null : v/base);
+      }
+      if (mode==='max') {
+        const mx = Math.max(...valid);
+        return arr.map(v=> v==null? null : v/mx);
+      }
+      return arr;
+    }
+
+    function transform(values) {
+      let v = values.slice();
+      v = normalize(v, normalizeSel.value);
+      if (smoothChk.checked) v = movingAverage(v, 3);
+      return v;
+    }
+
+    function getSelectedIds() {
+      const ids = Array.from(multiWell.selectedOptions).map(o=>o.value);
+      if (ids.length) return ids;
+      return [wellSelect.value || (DATA.wells[0] && DATA.wells[0].well)];
+    }
+
+    function renderChart() {
+      const ids = getSelectedIds();
+      const series = ids.map(id => {
+        const w = DATA.wells.find(x=>x.well===id);
+        return { id, content: w? w.content: '', values: w? transform(w.values): [] };
+      });
+      wellContent.textContent = (ids.length===1 && series[0]) ? (series[0].content? `Content: ${series[0].content}` : '') : `${ids.length} wells`;
       const width = svg.viewBox.baseVal && svg.viewBox.baseVal.width ? svg.viewBox.baseVal.width : svg.getAttribute('width');
       const height = svg.viewBox.baseVal && svg.viewBox.baseVal.height ? svg.viewBox.baseVal.height : svg.getAttribute('height');
       const W = +width, H = +height;
 
-      // Clear
       while (svg.firstChild) svg.removeChild(svg.firstChild);
 
-      // Padding and axes
       const pad = { left: 50, right: 20, top: 20, bottom: 40 };
       const innerW = W - pad.left - pad.right;
       const innerH = H - pad.top - pad.bottom;
-
-      // Scales
       const n = DATA.timeLabels.length;
       const x = i => pad.left + (i/(Math.max(1,n-1))) * innerW;
-      const y = v => pad.top + innerH - ( (v - DATA.yMin) / (Math.max(1, DATA.yMax - DATA.yMin)) ) * innerH;
 
-      // Axes lines
+      // Y domain from transformed data
+      let all = [];
+      for (const s of series) all.push(...s.values.filter(v=>v!=null && isFinite(v)));
+      let ymin = all.length? Math.min(...all): 0; let ymax = all.length? Math.max(...all): 1;
+      if (yScaleSel.value==='log') { ymin = Math.max(1e-6, ymin); }
+      const yLin = v => pad.top + innerH - ( (v - ymin) / (Math.max(1e-12, ymax - ymin)) ) * innerH;
+      const yLog = v => pad.top + innerH - ( (Math.log(Math.max(v,1e-6)) - Math.log(ymin)) / Math.max(1e-12, Math.log(ymax)-Math.log(ymin)) ) * innerH;
+      const y = (v) => yScaleSel.value==='log'? yLog(v): yLin(v);
+
       const axis = document.createElementNS('http://www.w3.org/2000/svg','path');
       axis.setAttribute('d', `M${pad.left},${pad.top} v${innerH} h${innerW}`);
-      axis.setAttribute('stroke', '#aaa');
-      axis.setAttribute('fill', 'none');
-      axis.setAttribute('stroke-width', '1');
-      svg.appendChild(axis);
+      axis.setAttribute('stroke', '#aaa'); axis.setAttribute('fill', 'none'); axis.setAttribute('stroke-width', '1'); svg.appendChild(axis);
 
-      // Y ticks (5)
       for (let i=0; i<=5; i++) {
-        const tv = DATA.yMin + (i/5)*(DATA.yMax - DATA.yMin);
+        const tv = yScaleSel.value==='log' ? (ymin * Math.pow(ymax/ymin, i/5)) : (ymin + (i/5)*(ymax - ymin));
         const ty = y(tv);
-        const grid = document.createElementNS('http://www.w3.org/2000/svg','line');
-        grid.setAttribute('x1', pad.left);
-        grid.setAttribute('x2', pad.left + innerW);
-        grid.setAttribute('y1', ty);
-        grid.setAttribute('y2', ty);
-        grid.setAttribute('stroke', '#eee');
-        svg.appendChild(grid);
-
-        const lbl = document.createElementNS('http://www.w3.org/2000/svg','text');
-        lbl.setAttribute('x', pad.left - 6);
-        lbl.setAttribute('y', ty + 4);
-        lbl.setAttribute('text-anchor', 'end');
-        lbl.setAttribute('font-size', '11');
-        lbl.textContent = tv.toFixed(0);
-        svg.appendChild(lbl);
+        const grid = document.createElementNS('http://www.w3.org/2000/svg','line'); grid.setAttribute('x1', pad.left); grid.setAttribute('x2', pad.left + innerW); grid.setAttribute('y1', ty); grid.setAttribute('y2', ty); grid.setAttribute('stroke', '#eee'); svg.appendChild(grid);
+        const lbl = document.createElementNS('http://www.w3.org/2000/svg','text'); lbl.setAttribute('x', pad.left - 6); lbl.setAttribute('y', ty + 4); lbl.setAttribute('text-anchor', 'end'); lbl.setAttribute('font-size', '11'); lbl.textContent = (yScaleSel.value==='log'? tv.toExponential(1) : tv.toFixed(0)); svg.appendChild(lbl);
       }
-
-      // X ticks (every 10 min)
       for (let i=0; i<n; i+=10) {
         const tx = x(i);
-        const lbl = document.createElementNS('http://www.w3.org/2000/svg','text');
-        lbl.setAttribute('x', tx);
-        lbl.setAttribute('y', pad.top + innerH + 20);
-        lbl.setAttribute('text-anchor', 'middle');
-        lbl.setAttribute('font-size', '11');
-        lbl.textContent = DATA.timeLabels[i];
-        svg.appendChild(lbl);
+        const lbl = document.createElementNS('http://www.w3.org/2000/svg','text'); lbl.setAttribute('x', tx); lbl.setAttribute('y', pad.top + innerH + 20); lbl.setAttribute('text-anchor', 'middle'); lbl.setAttribute('font-size', '11'); lbl.textContent = DATA.timeLabels[i]; svg.appendChild(lbl);
       }
 
-      if (!w) return;
+      // Draw lines
+      series.forEach((s, si) => {
+        let d='';
+        for (let i=0;i<n;i++) { const v = s.values[i]; if (v==null || !isFinite(v)) continue; const px=x(i), py=y(v); d += (d? ' L':'M')+px+','+py; }
+        const path = document.createElementNS('http://www.w3.org/2000/svg','path'); path.setAttribute('d', d); path.setAttribute('fill','none'); path.setAttribute('stroke', palette(si)); path.setAttribute('stroke-width','2'); svg.appendChild(path);
+      });
 
-      // Line path
-      let d = '';
-      for (let i=0; i<n; i++) {
-        const v = w.values[i];
-        if (v == null) continue;
-        const px = x(i), py = y(v);
-        d += (d ? ' L' : 'M') + px + ',' + py;
-      }
-      const path = document.createElementNS('http://www.w3.org/2000/svg','path');
-      path.setAttribute('d', d);
-      path.setAttribute('fill', 'none');
-      path.setAttribute('stroke', '#1976d2');
-      path.setAttribute('stroke-width', '2');
-      svg.appendChild(path);
+      // Legend
+      legendBox.innerHTML = series.map((s,si)=>`<span style="display:inline-flex;align-items:center;gap:6px;margin-right:8px"><span style="display:inline-block;width:12px;height:12px;background:${palette(si)};"></span>${s.id}</span>`).join('');
 
-      // Points (hover)
-      for (let i=0; i<n; i++) {
-        const v = w.values[i];
-        if (v == null) continue;
-        const cx = x(i), cy = y(v);
-        const c = document.createElementNS('http://www.w3.org/2000/svg','circle');
-        c.setAttribute('cx', cx);
-        c.setAttribute('cy', cy);
-        c.setAttribute('r', 3);
-        c.setAttribute('fill', '#1976d2');
-        c.setAttribute('opacity', '0.8');
-        c.addEventListener('mouseenter', () => { c.setAttribute('r','5'); });
-        c.addEventListener('mouseleave', () => { c.setAttribute('r','3'); });
-        svg.appendChild(c);
-      }
+      // Tooltip overlay
+      const overlay = document.createElementNS('http://www.w3.org/2000/svg','rect'); overlay.setAttribute('x', pad.left); overlay.setAttribute('y', pad.top); overlay.setAttribute('width', innerW); overlay.setAttribute('height', innerH); overlay.setAttribute('fill','transparent'); svg.appendChild(overlay);
+      const vline = document.createElementNS('http://www.w3.org/2000/svg','line'); vline.setAttribute('stroke','#999'); vline.setAttribute('y1', pad.top); vline.setAttribute('y2', pad.top+innerH); vline.setAttribute('visibility','hidden'); svg.appendChild(vline);
+      overlay.addEventListener('mousemove', (ev)=>{
+        const rect = svg.getBoundingClientRect(); const mx = ev.clientX - rect.left; const t = Math.max(0, Math.min(n-1, Math.round((mx - pad.left)/innerW*(n-1))));
+        const tx = x(t); vline.setAttribute('x1', tx); vline.setAttribute('x2', tx); vline.setAttribute('visibility','visible');
+        const rows = series.map((s,si)=>({ id:s.id, color:palette(si), v:s.values[t] }));
+        const html = `<div><b>${DATA.timeLabels[t]}</b></div>` + rows.map(r=>`<div><span style="display:inline-block;width:10px;height:10px;background:${r.color};margin-right:6px"></span>${r.id}: ${r.v==null? '' : (yScaleSel.value==='log'? r.v.toExponential(2): r.v.toFixed(0))}</div>`).join('');
+        tooltip.innerHTML = html; tooltip.style.display='block'; tooltip.style.left = (rect.left + tx + 12) + 'px'; tooltip.style.top = (rect.top + pad.top + 8) + 'px';
+      });
+      overlay.addEventListener('mouseleave', ()=>{ vline.setAttribute('visibility','hidden'); tooltip.style.display='none'; });
+
+      // Export
+      exportBtn.onclick = ()=>{
+        const serializer = new XMLSerializer(); const svgStr = serializer.serializeToString(svg); const img = new Image(); const canvas = document.createElement('canvas'); canvas.width = W; canvas.height = H; const ctx = canvas.getContext('2d');
+        img.onload = ()=>{ ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--bg').trim() || '#fff'; ctx.fillRect(0,0,W,H); ctx.drawImage(img,0,0); const a = document.createElement('a'); a.download = 'chart.png'; a.href = canvas.toDataURL('image/png'); a.click(); };
+        img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgStr);
+      };
     }
 
-    wellSelect.addEventListener('change', (e) => { renderChart(e.target.value); renderStats(e.target.value); });
+    function refreshChartAndSave(){ renderChart(); renderStats(getSelectedIds()[0]); saveSettings(); }
+    wellSelect.addEventListener('change', refreshChartAndSave);
+    multiWell.addEventListener('change', refreshChartAndSave);
+    yScaleSel.addEventListener('change', refreshChartAndSave);
+    smoothChk.addEventListener('change', refreshChartAndSave);
+    normalizeSel.addEventListener('change', refreshChartAndSave);
     if (DATA.wells.length) {
       wellSelect.value = DATA.wells[0].well;
       renderChart(DATA.wells[0].well);
@@ -279,7 +376,66 @@
       }
       table.appendChild(tbody);
     }
+    // Table features
+    let currentRows = DATA.wells.slice();
+    let currentPage = 1; const pageSizeSel = document.getElementById('pageSize'); const pageInfo = document.getElementById('pageInfo');
+    function renderTable(rows) {
+      currentRows = rows.slice(); const pageSize = parseInt(pageSizeSel.value,10); const total = currentRows.length; const pages = Math.max(1, Math.ceil(total/pageSize)); if (currentPage>pages) currentPage=pages; const start=(currentPage-1)*pageSize; const end=Math.min(total, start+pageSize); const pageRows = currentRows.slice(start,end);
+      table.innerHTML = '';
+      const thead = document.createElement('thead');
+      const trh = document.createElement('tr');
+      const thWell = document.createElement('th'); thWell.textContent = 'Well'; thWell.className = 'sticky-col-1 col-well'; thWell.dataset.key='well'; trh.appendChild(thWell);
+      const thContent = document.createElement('th'); thContent.textContent = 'Content'; thContent.className = 'sticky-col-2 col-content'; thContent.dataset.key='content'; trh.appendChild(thContent);
+      const thTrend = document.createElement('th'); thTrend.textContent = 'Trend'; trh.appendChild(thTrend);
+      for (let ci=0; ci<DATA.timeLabels.length; ci++) { const t = DATA.timeLabels[ci]; const th = document.createElement('th'); th.textContent = t; th.dataset.key='c'+ci; trh.appendChild(th); }
+      thead.appendChild(trh); table.appendChild(thead);
+
+      // per-column min/max for formatting
+      const colMin = Array(DATA.timeLabels.length).fill(+Infinity); const colMax = Array(DATA.timeLabels.length).fill(-Infinity);
+      for (const w of pageRows) { for (let i=0;i<DATA.timeLabels.length;i++){ const v=w.values[i]; if (v!=null && isFinite(v)) { if (v<colMin[i]) colMin[i]=v; if (v>colMax[i]) colMax[i]=v; } } }
+
+      const tbody = document.createElement('tbody');
+      for (const w of pageRows) {
+        const tr = document.createElement('tr');
+        const tdW = document.createElement('td'); tdW.textContent = w.well; tdW.className = 'sticky-col-1'; tr.appendChild(tdW);
+        const tdC = document.createElement('td'); tdC.textContent = w.content || ''; tdC.className = 'sticky-col-2'; tr.appendChild(tdC);
+        // sparkline
+        const tdS = document.createElement('td'); const sW=120,sH=24,pad=2; const svgS = document.createElementNS('http://www.w3.org/2000/svg','svg'); svgS.setAttribute('width', sW); svgS.setAttribute('height', sH);
+        const vals = w.values.filter(v=>v!=null && isFinite(v)); const mn=vals.length?Math.min(...vals):0; const mx=vals.length?Math.max(...vals):1; const xS=(i)=>pad + i/(DATA.timeLabels.length-1)*(sW-2*pad); const yS=(v)=> pad + (sH-2*pad) - ( (v-mn)/Math.max(1e-12,(mx-mn)) )*(sH-2*pad);
+        let d=''; for(let i=0;i<DATA.timeLabels.length;i++){ const v=w.values[i]; if(v==null||!isFinite(v)) continue; const px=xS(i), py=yS(v); d+=(d? ' L':'M')+px+','+py; } const pth=document.createElementNS('http://www.w3.org/2000/svg','path'); pth.setAttribute('d', d); pth.setAttribute('fill','none'); pth.setAttribute('stroke','#888'); pth.setAttribute('stroke-width','1'); svgS.appendChild(pth); tdS.appendChild(svgS); tr.appendChild(tdS);
+        for (let i=0;i<DATA.timeLabels.length;i++) { const v=w.values[i]; const td=document.createElement('td'); td.textContent = (v==null? '' : v); if (v!=null && isFinite(v) && isFinite(colMin[i]) && isFinite(colMax[i]) && colMax[i]>colMin[i]) { const t=(v-colMin[i])/(colMax[i]-colMin[i]); const R=255, G=Math.round(255*(1-t)), B=Math.round(200*(1-t)); td.style.background = `rgb(${R},${G},${B},0.15)`; } tr.appendChild(td); }
+        tr.addEventListener('dblclick', ()=>{ navigator.clipboard.writeText([w.well, w.content||'', ...w.values].join(',')); });
+        tbody.appendChild(tr);
+      }
+      table.appendChild(tbody);
+
+      // sorting
+      trh.querySelectorAll('th').forEach(th=>{
+        th.style.cursor='pointer';
+        th.onclick=()=>{
+          const key=th.dataset.key; if(!key) return; const factor = (th.dataset.dir==='desc')? -1:1; th.dataset.dir = (factor===1?'desc':'asc');
+          currentRows.sort((a,b)=>{
+            if (key==='well') return factor * a.well.localeCompare(b.well);
+            if (key==='content') return factor * (''+(a.content||'')).localeCompare(''+(b.content||''));
+            if (key && key.startsWith('c')) { const idx=parseInt(key.slice(1),10); return factor * (((b.values[idx]||0)-(a.values[idx]||0))); }
+            return 0;
+          });
+          currentPage=1; renderTable(currentRows);
+        };
+      });
+
+      pageInfo.textContent = `${start+1}-${end} / ${total}`;
+    }
+    pageSizeSel.addEventListener('change', ()=>{ currentPage=1; renderTable(currentRows); });
+    document.getElementById('prevPage').addEventListener('click', ()=>{ if(currentPage>1){ currentPage--; renderTable(currentRows); } });
+    document.getElementById('nextPage').addEventListener('click', ()=>{ const pages=Math.ceil(currentRows.length/parseInt(pageSizeSel.value,10)); if(currentPage<pages){ currentPage++; renderTable(currentRows); } });
     renderTable(DATA.wells);
+
+    // Content chips
+    const chipsBox = document.getElementById('chips');
+    const contents = Array.from(new Set(DATA.wells.map(w=>w.content || ''))).filter(Boolean).sort();
+    let activeChips = new Set();
+    contents.forEach(c=>{ const btn=document.createElement('button'); btn.textContent=c; btn.className='btn secondary'; btn.onclick=()=>{ if(activeChips.has(c)) activeChips.delete(c); else activeChips.add(c); btn.classList.toggle('secondary'); applyFilterSort(); }; chipsBox.appendChild(btn); });
 
     // Theme toggle
     const themeBtn = document.getElementById('themeBtn');
@@ -306,14 +462,14 @@
     const sortSelect = document.getElementById('sortSelect');
     function applyFilterSort() {
       const q = filterInput.value.trim().toLowerCase();
-      let rows = DATA.wells.filter(w => w.well.toLowerCase().includes(q) || (w.content || '').toLowerCase().includes(q));
+      let rows = DATA.wells.filter(w => (w.well.toLowerCase().includes(q) || (w.content || '').toLowerCase().includes(q)) && (activeChips.size===0 || activeChips.has(w.content||'')) );
       const by = sortSelect.value;
       if (by === 'peak' || by === 'mean') {
         rows = rows.map(w => ({ ...w, _mean: w.values.reduce((a,b) => a + (b || 0), 0) / w.values.filter(v => v!=null).length, _peak: Math.max(...w.values.filter(v => v!=null)) }));
         rows.sort((a,b) => (by==='peak' ? (b._peak - a._peak) : (b._mean - a._mean)));
         rows = rows.map(({_mean,_peak, ...rest}) => rest);
       }
-      renderTable(rows);
+      currentPage=1; renderTable(rows);
     }
     filterInput.addEventListener('input', applyFilterSort);
     sortSelect.addEventListener('change', applyFilterSort);
@@ -332,8 +488,8 @@
     document.getElementById('dlCorrBtn').addEventListener('click', () => { const header = ['Well', ...WELL_IDS]; const lines = [header.join(',')]; for (let i=0;i<N;i++) { lines.push([WELL_IDS[i], ...CORR[i].map(v => v.toFixed(4))].join(',')); } download('hoff_correlations.csv', lines.join('\n')); });
 
     // ===== Relations (correlations) =====
-    const WELL_IDS = DATA.wells.map(w => w.well);
-    const WELL_INDEX = Object.fromEntries(WELL_IDS.map((id, i) => [id, i]));
+    let WELL_IDS = DATA.wells.map(w => w.well);
+    let WELL_INDEX = Object.fromEntries(WELL_IDS.map((id, i) => [id, i]));
 
     function pearson(a, b) {
       let n = Math.min(a.length, b.length);
@@ -474,7 +630,53 @@
       box.textContent = top;
     }
 
+    // Windowed correlations
+    const winStart = document.getElementById('winStart');
+    const winEnd = document.getElementById('winEnd');
+    const winLabel = document.getElementById('winLabel');
+    function recomputeCorr() {
+      const s = Math.min(+winStart.value, +winEnd.value); const e = Math.max(+winStart.value, +winEnd.value);
+      winLabel.textContent = `${DATA.timeLabels[s]} - ${DATA.timeLabels[e]}`;
+      for (let i=0;i<N;i++) for (let j=0;j<N;j++) CORR[i][j]=0;
+      pairs.length=0;
+      for (let i=0; i<N; i++) {
+        CORR[i][i]=1;
+        for (let j=i+1;j<N;j++) {
+          const a=DATA.wells[i].values.slice(s,e+1); const b=DATA.wells[j].values.slice(s,e+1); const r=pearson(a,b);
+          CORR[i][j]=r; CORR[j][i]=r; pairs.push({i,j,r});
+        }
+      }
+      pairs.sort((a,b)=>b.r-a.r);
+    }
+    winStart.addEventListener('input', ()=>{ recomputeCorr(); drawHeatmap(wellSelect.value); });
+    winEnd.addEventListener('input', ()=>{ recomputeCorr(); drawHeatmap(wellSelect.value); });
+
+    // Simple greedy seriation for clustering
+    const clusterBtn = document.getElementById('clusterBtn');
+    const resetOrderBtn = document.getElementById('resetOrderBtn');
+    const ORIGINAL_IDS = DATA.wells.map(w=>w.well);
+    function clusterOrder() {
+      const used=new Set(); const best = pairs[0]; if(!best) return ORIGINAL_IDS.slice();
+      let order=[best.i,best.j]; used.add(best.i); used.add(best.j);
+      while(order.length<N){
+        let bestAdd=null, bestPos=null, bestR=-Infinity;
+        for(let k=0;k<N;k++){ if(used.has(k)) continue; const rLeft=CORR[k][order[0]]; const rRight=CORR[k][order[order.length-1]]; if(rLeft>bestR){ bestR=rLeft; bestAdd=k; bestPos='left'; } if(rRight>bestR){ bestR=rRight; bestAdd=k; bestPos='right'; } }
+        if(bestPos==='left') order.unshift(bestAdd); else order.push(bestAdd); used.add(bestAdd);
+      }
+      return order.map(idx=>DATA.wells[idx].well);
+    }
+    clusterBtn.addEventListener('click', ()=>{
+      const ids = clusterOrder();
+      WELL_IDS = ids; WELL_INDEX = Object.fromEntries(WELL_IDS.map((id,i)=>[id,i]));
+      drawHeatmap(wellSelect.value);
+    });
+    resetOrderBtn.addEventListener('click', ()=>{
+      WELL_IDS = ORIGINAL_IDS.slice(); WELL_INDEX = Object.fromEntries(WELL_IDS.map((id,i)=>[id,i]));
+      drawHeatmap(wellSelect.value);
+    });
+
     // Initial relations render
+    recomputeCorr();
     drawHeatmap(wellSelect.value);
     renderNeighbors(wellSelect.value);
 
