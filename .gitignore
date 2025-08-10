@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Data
+data/raw/**
+*.xlsx
+
+# OS/IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Reports cache
+reports/*.tmp
+
