@@ -63,28 +63,28 @@
   </header>
 
   <section>
-    <div class="row toolbar">
+    <div class="row toolbar" role="group" aria-label="Controls">
       <div style="display:flex; align-items:center; gap:8px;">
         <label for="wellSelect"><b>Select well</b></label>
-        <select id="wellSelect"></select>
+        <select id="wellSelect" aria-label="Select primary well"></select>
         <span class="muted" id="wellContent"></span>
       </div>
       <label for="multiWell" class="muted">Compare</label>
-      <select id="multiWell" multiple size="4" style="min-width:160px"></select>
+      <select id="multiWell" aria-label="Select comparison wells" multiple size="4" style="min-width:160px"></select>
       <label for="yScale" class="muted">Scale</label>
-      <select id="yScale">
+      <select id="yScale" aria-label="Y scale">
         <option value="linear">Linear</option>
         <option value="log">Log</option>
       </select>
       <label for="smoothChk" class="muted">Smooth</label>
-      <input id="smoothChk" type="checkbox" />
+      <input id="smoothChk" type="checkbox" aria-label="Smoothing" />
       <label for="normalize" class="muted">Normalize</label>
-      <select id="normalize">
+      <select id="normalize" aria-label="Normalization mode">
         <option value="none">None</option>
         <option value="t0">to t0</option>
         <option value="max">to max</option>
       </select>
-      <button id="exportPng" class="btn secondary" title="Export chart as PNG">Export PNG</button>
+      <button id="exportPng" class="btn secondary" title="Export chart as PNG" aria-label="Export chart as PNG">Export PNG</button>
       <input id="filterInput" type="text" placeholder="Filter wells by id or content..." />
       <label for="sortSelect" class="muted">Sort</label>
       <select id="sortSelect">
@@ -302,6 +302,13 @@
       const axis = document.createElementNS('http://www.w3.org/2000/svg','path');
       axis.setAttribute('d', `M${pad.left},${pad.top} v${innerH} h${innerW}`);
       axis.setAttribute('stroke', '#aaa'); axis.setAttribute('fill', 'none'); axis.setAttribute('stroke-width', '1'); svg.appendChild(axis);
+      // axis labels
+      const yLabel = document.createElementNS('http://www.w3.org/2000/svg','text');
+      yLabel.setAttribute('transform', `translate(${pad.left-40},${pad.top+innerH/2}) rotate(-90)`);
+      yLabel.setAttribute('text-anchor', 'middle'); yLabel.setAttribute('font-size','12'); yLabel.textContent = 'Fluorescence (a.u.)'; svg.appendChild(yLabel);
+      const xLabel = document.createElementNS('http://www.w3.org/2000/svg','text');
+      xLabel.setAttribute('x', pad.left + innerW/2); xLabel.setAttribute('y', pad.top + innerH + 34);
+      xLabel.setAttribute('text-anchor','middle'); xLabel.setAttribute('font-size','12'); xLabel.textContent = 'Time (min)'; svg.appendChild(xLabel);
 
       for (let i=0; i<=5; i++) {
         const tv = yScaleSel.value==='log' ? (ymin * Math.pow(ymax/ymin, i/5)) : (ymin + (i/5)*(ymax - ymin));
